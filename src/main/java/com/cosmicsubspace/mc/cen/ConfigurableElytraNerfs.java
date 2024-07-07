@@ -124,11 +124,17 @@ public class ConfigurableElytraNerfs extends JavaPlugin implements CommandExecut
                     World w=p.getWorld();
                     Chunk c=w.getChunkAt(loc);
                     ChunkSnapshot cs=c.getChunkSnapshot();
+
                     
                     int chunkX=((loc.getBlockX()%16)+16)%16;
                     int chunkY=loc.getBlockY();
                     int chunkZ=((loc.getBlockZ()%16)+16)%16;
-                    int skylight=cs.getBlockSkyLight(chunkX,chunkY,chunkZ);
+                    int maxY=w.getMaxHeight();
+
+                    int skylight;
+                    if (!w.hasSkyLight()) skylight = 0;
+                    else if (chunkY>=maxY) skylight = 15;
+                    else skylight=cs.getBlockSkyLight(chunkX,chunkY,chunkZ);
                     
                     long time=w.getTime();
                     // Below is the time range where daylight is at 15 (strongest)

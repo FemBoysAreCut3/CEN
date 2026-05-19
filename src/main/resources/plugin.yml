@@ -1,8 +1,8 @@
 name: ConfigurableElytraNerfs
-version: 1.0.1
+version: 1.0.2
 main: com.cosmicsubspace.mc.cen.ConfigurableElytraNerfs
 description: Nerfs Elytras... configurably.
-api-version: '1.17'
+authors: [CosmicSubspace, FemBoysAreCut3]
 commands:
     cen:
         description: Print info about CEN plugin

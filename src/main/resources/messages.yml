@@ -1,0 +1,25 @@
+prefix: "<blue>[CEN]</blue> "
+command-not-enabled: "<red>CEN is not fully enabled yet.</red>"
+
+icarus:
+  prefix: "<blue>[CEN</blue>/<aqua>ICARUS]</aqua> "
+  warn-line1: "<red><bold>!!! YOUR WINGS ARE MELTING !!!</bold></red>"
+  warn-line2-sunlight: "<gray><italic>Flying under direct sunlight...</italic></gray>"
+  warn-line2-nether: "<gray><italic>Flying under direct sunlight (or in the Nether)...</italic></gray>"
+  warn-line3: "<gray><italic>Your elytra takes %percentage%% damage every second.</italic></gray>"
+  title-subtitle: "<red>Elytra %percentage%%</red>"
+
+acrophobia:
+  prefix: "<blue>[CEN</blue>/<aqua>Acrophobia]</aqua> "
+  warn: "<red>You are afraid of heights...</red>"
+  notice: "<red><bold>You are blind with fear!</bold></red>"
+
+terminal-velocity:
+  warn: "<blue>[CEN</blue>/<aqua>TerminalVelocity]</aqua> <red>The maximum elytra speed is <bold>%speed%m/s</bold></red>"
+
+glider:
+  warn: "<blue>[CEN</blue>/<aqua>Glider]</aqua> <red><bold>Boosting elytra with fireworks is not allowed!</bold></red>"
+
+limit-boost:
+  warn-multiple: "<blue>[CEN</blue>/<aqua>LimitBoost]</aqua> <red>You can only boost <bold>%count%</bold> times every <bold>%seconds%</bold> seconds.</red>"
+  warn-once: "<blue>[CEN</blue>/<aqua>LimitBoost]</aqua> <red>You can only boost <bold>ONCE</bold> every <bold>%seconds%</bold> seconds.</red>"

@@ -1,597 +1,341 @@
 package com.cosmicsubspace.mc.cen;
 
-import org.bukkit.plugin.java.JavaPlugin;
-
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.World;
+import org.bukkit.command.Command;
+import org.bukkit.command.CommandExecutor;
+import org.bukkit.command.CommandSender;
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
+import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
-import org.bukkit.event.player.PlayerMoveEvent;
-import org.bukkit.scheduler.BukkitScheduler;
-import org.bukkit.entity.Player;
-import org.bukkit.World;
-import org.bukkit.Location;
-import org.bukkit.Chunk;
-import org.bukkit.ChunkSnapshot;
-import org.bukkit.block.Block;
-import org.bukkit.inventory.PlayerInventory;
-import org.bukkit.Material;
-import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.inventory.meta.Damageable;
-import org.bukkit.inventory.ItemStack;
-import java.lang.Math;
-import org.bukkit.ChatColor;
-import java.util.Map;
-import java.util.HashMap;
-import java.util.List;
-import java.util.ArrayList;
-import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.event.player.PlayerInteractEvent;
-import org.bukkit.event.player.PlayerVelocityEvent;
-import org.bukkit.util.Vector;
-import org.bukkit.potion.PotionEffectType;
+import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
+import org.bukkit.inventory.meta.Damageable;
+import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.potion.PotionEffect;
-import org.bukkit.command.Command;
-import org.bukkit.command.CommandSender;
-import org.bukkit.command.CommandExecutor;
+import org.bukkit.potion.PotionEffectType;
+import org.bukkit.util.Vector;
+import org.jetbrains.annotations.NotNull;
 
-public class ConfigurableElytraNerfs extends JavaPlugin implements CommandExecutor
-{      
+import java.io.File;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.*;
 
-    String command_output = "CEN not enabled yet.";
+public class ConfigurableElytraNerfs extends JavaPlugin implements CommandExecutor, Listener {
+
+    private FileConfiguration messagesConfig;
+    private Component commandOutput;
+    private final Map<String, Map<UUID, Long>> lastNotifiedTime = new HashMap<>();
+    private final Map<UUID, Long> lastOnGround = new HashMap<>();
+    private final Map<UUID, List<Long>> boostLog = new HashMap<>();
+    private final MiniMessage mm = MiniMessage.miniMessage();
+    private boolean papiEnabled;
+
     @Override
-    public boolean onCommand(CommandSender sender, Command cmd, String label, String[] args) {
-        sender.sendMessage(command_output);
+    public void onEnable() {
+        this.saveDefaultConfig();
+        this.loadMessagesConfig();
+        this.papiEnabled = Bukkit.getPluginManager().isPluginEnabled("PlaceholderAPI");
+        this.commandOutput = parseMsg("command-not-enabled");
+
+        FileConfiguration config = getConfig();
+        boolean confAllDisable = config.getBoolean("cen_all_disable");
+        boolean confUseTicktime = config.getBoolean("cen-use-tick-time");
+
+        if (!confAllDisable) {
+            getServer().getPluginManager().registerEvents(this, this);
+
+            if (config.getBoolean("icarus-enabled")) {
+                int confIcarusHit = config.getInt("icarus-durability-hit");
+                boolean confIcarusAllowNether = config.getBoolean("icarus-allow-nether");
+                boolean confIcarusAllowRaining = config.getBoolean("icarus-allow-raining");
+                int confIcarusMinY = config.getInt("icarus-minimum-height");
+                int icarusHitPerSec = (int) Math.round(confIcarusHit * 2 / 432.0 * 100);
+
+                getServer().getScheduler().runTaskTimer(this, () -> {
+                    for (Player p : getServer().getOnlinePlayers()) {
+                        if (!p.isGliding()) continue;
+
+                        Location loc = p.getLocation();
+                        World w = p.getWorld();
+                        int chunkY = loc.getBlockY();
+
+                        int skylight = 0;
+                        if (w.hasSkyLight()) {
+                            if (chunkY >= w.getMaxHeight()) {
+                                skylight = 15;
+                            } else {
+                                skylight = loc.getBlock().getLightFromSky();
+                            }
+                        }
+
+                        long time = w.getTime();
+                        boolean isDay = (time >= 0) && (time <= 12000);
+                        boolean sunUp = confIcarusAllowRaining ? (w.isClearWeather() && isDay && w.hasSkyLight()) : (isDay && w.hasSkyLight());
+                        boolean heightHigh = chunkY > confIcarusMinY;
+                        boolean sunlightOnPlayer = (skylight == 15) && sunUp && heightHigh;
+
+                        if (!confIcarusAllowNether && w.isUltraWarm()) {
+                            sunlightOnPlayer = true;
+                        }
+
+                        PlayerInventory pinv = p.getInventory();
+                        ItemStack chestplate = pinv.getChestplate();
+
+                        if (chestplate != null && chestplate.getType() == Material.ELYTRA && sunlightOnPlayer && heightHigh) {
+                            if (chestplate.getItemMeta() instanceof Damageable dmg) {
+                                int damage = dmg.getDamage() + confIcarusHit;
+                                if (damage >= Material.ELYTRA.getMaxDurability()) {
+                                    damage = Material.ELYTRA.getMaxDurability() - 1;
+                                }
+                                dmg.setDamage(damage);
+                                float durabilityRatio = 1.0f - damage / (float) Material.ELYTRA.getMaxDurability();
+                                chestplate.setItemMeta(dmg);
+                                pinv.setChestplate(chestplate);
+
+                                if (rateLimitMsg("Icarus", p.getUniqueId(), 10000)) {
+                                    String line2Path = confIcarusAllowNether ? "icarus.warn-line2-sunlight" : "icarus.warn-line2-nether";
+                                    p.sendMessage(parseMsg("icarus.prefix").append(parseMsg("icarus.warn-line1")));
+                                    p.sendMessage(parseMsg("icarus.prefix").append(parseMsg(line2Path)));
+                                    p.sendMessage(parseMsg("icarus.prefix").append(parseMsg("icarus.warn-line3", p, "%percentage%", String.valueOf(icarusHitPerSec))));
+                                }
+
+                                Component subTitleComp = parseMsg("icarus.title-subtitle", p, "%percentage%", String.valueOf(Math.round(durabilityRatio * 100)));
+                                Title title = Title.title(Component.empty(), subTitleComp, Title.Times.times(Duration.ZERO, Duration.ofMillis(1000), Duration.ofMillis(1000)));
+                                p.showTitle(title);
+                            }
+                        }
+                    }
+                }, 0L, 10L);
+            }
+
+            if (config.getBoolean("acrophobia-enabled")) {
+                double confAcrophobiaHeight = config.getDouble("acrophobia-height");
+                double confAcrophobiaDurationSec = config.getDouble("acrophobia-duration");
+                int confAcrophobiaDurationTicks = (int) Math.round(confAcrophobiaDurationSec * 20);
+                int confAcrophobiaPower = (int) config.getDouble("acrophobia-power") - 1;
+                double confAcrophobiaDelay = config.getDouble("acrophobia-delay");
+
+                getServer().getScheduler().runTaskTimer(this, () -> {
+                    for (Player p : getServer().getOnlinePlayers()) {
+                        long t = confUseTicktime ? p.getWorld().getFullTime() * 50 : System.currentTimeMillis();
+                        UUID uuid = p.getUniqueId();
+                        boolean gliding = p.isGliding();
+                        Location loc = p.getLocation();
+                        World w = p.getWorld();
+
+                        int highestY = w.getHighestBlockYAt(loc);
+                        boolean tooHigh = (loc.getY() - highestY) > confAcrophobiaHeight;
+                        boolean scared = tooHigh && gliding;
+
+                        lastOnGround.putIfAbsent(uuid, 0L);
+
+                        if (!scared) {
+                            lastOnGround.put(uuid, t);
+                        } else {
+                            if (rateLimitMsg("acrophobia-warn", uuid, 10000)) {
+                                p.sendMessage(parseMsg("acrophobia.prefix").append(parseMsg("acrophobia.warn")));
+                            }
+                            if (t - lastOnGround.get(uuid) > (confAcrophobiaDelay * 1000 - 0.1)) {
+                                p.addPotionEffect(new PotionEffect(PotionEffectType.BLINDNESS, confAcrophobiaDurationTicks, confAcrophobiaPower, true, true));
+                                if (rateLimitMsg("acrophobia-notice", uuid, 10000)) {
+                                    rateLimitMsg("acrophobia-warn", uuid, 0);
+                                    p.sendMessage(parseMsg("acrophobia.prefix").append(parseMsg("acrophobia.notice")));
+                                }
+                            }
+                        }
+                    }
+                }, 5L, 10L);
+            }
+
+            if (config.getBoolean("terminal-velocity-enabled")) {
+                double confTvMaxvelMps = config.getDouble("terminal-velocity-speed");
+                double confTvMaxvelMpt = confTvMaxvelMps / 20.0;
+
+                getServer().getScheduler().runTaskTimer(this, () -> {
+                    for (Player p : getServer().getOnlinePlayers()) {
+                        if (!p.isGliding()) continue;
+                        Vector v = p.getVelocity();
+                        if (v.length() > confTvMaxvelMpt) {
+                            p.setVelocity(v.normalize().multiply(confTvMaxvelMpt));
+                            if (rateLimitMsg("TermVel", p.getUniqueId(), 10000)) {
+                                p.sendMessage(parseMsg("terminal-velocity.warn", p, "%speed%", String.valueOf(confTvMaxvelMps)));
+                            }
+                        }
+                    }
+                }, 0L, 2L);
+            }
+        }
+
+        this.buildAndCacheStatusMessage(confAllDisable, confUseTicktime, config);
+    }
+
+    @Override
+    public void onDisable() {
+        lastNotifiedTime.clear();
+        lastOnGround.clear();
+        boostLog.clear();
+    }
+
+    @Override
+    public boolean onCommand(@NotNull CommandSender sender, @NotNull Command cmd, @NotNull String label, @NotNull String[] args) {
+        sender.sendMessage(commandOutput);
         return true;
     }
-    Map<String,Map<String,Long>> lastNotifiedTime = new HashMap<>();
-    boolean rateLimitMsg(String type, String username, int millisec){
-        if (lastNotifiedTime.get(type) == null){
-            lastNotifiedTime.put(type,new HashMap<>());
+
+    @EventHandler
+    public void onPlayerInteract(PlayerInteractEvent evt) {
+        FileConfiguration config = getConfig();
+        if (config.getBoolean("cen_all_disable")) return;
+
+        Player p = evt.getPlayer();
+        if (!p.isGliding() || evt.getMaterial() != Material.FIREWORK_ROCKET) return;
+
+        UUID uuid = p.getUniqueId();
+        long t = config.getBoolean("cen-use-tick-time") ? p.getWorld().getFullTime() * 50 : System.currentTimeMillis();
+
+        if (config.getBoolean("glider-enabled")) {
+            evt.setCancelled(true);
+            if (rateLimitMsg("glider", uuid, 1000)) {
+                p.sendMessage(parseMsg("glider.warn"));
+            }
+            return;
         }
-        Map<String,Long> username2time = lastNotifiedTime.get(type);
-        if (username2time.get(username)==null){
-            username2time.put(username,-1000000L);
+
+        if (config.getBoolean("limit-boost-enabled")) {
+            int confLimitboostTimeMs = (int) Math.round(config.getDouble("limit-boost-time-period") * 1000);
+            int confLimitboostCount = (int) config.getDouble("limit-boost-count");
+
+            boostLog.putIfAbsent(uuid, new ArrayList<>());
+            List<Long> personalList = boostLog.get(uuid);
+
+            personalList.removeIf(time -> Math.abs(time - t) > confLimitboostTimeMs);
+
+            if (!personalList.isEmpty() && (Math.abs(personalList.get(personalList.size() - 1) - t) < 10)) {
+                return;
+            }
+
+            if (personalList.size() >= confLimitboostCount) {
+                evt.setCancelled(true);
+                if (rateLimitMsg("limitboost", uuid, 1000)) {
+                    if (confLimitboostCount != 1) {
+                        Map<String, String> placeholders = new HashMap<>();
+                        placeholders.put("%count%", String.valueOf(confLimitboostCount));
+                        placeholders.put("%seconds%", String.valueOf(confLimitboostTimeMs / 1000));
+                        p.sendMessage(parseMsg("limit-boost.warn-multiple", p, placeholders));
+                    } else {
+                        p.sendMessage(parseMsg("limit-boost.warn-once", p, "%seconds%", String.valueOf(confLimitboostTimeMs / 1000)));
+                    }
+                }
+            } else {
+                personalList.add(t);
+            }
         }
-        long lastNotified=username2time.get(username);
-        long t=System.currentTimeMillis();
-        if (Math.abs(t-lastNotified)>millisec){
-            username2time.put(username,t);
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent evt) {
+        UUID uuid = evt.getPlayer().getUniqueId();
+        lastOnGround.remove(uuid);
+        boostLog.remove(uuid);
+        for (Map<UUID, Long> map : lastNotifiedTime.values()) {
+            map.remove(uuid);
+        }
+    }
+
+    private boolean rateLimitMsg(String type, UUID uuid, int millisec) {
+        lastNotifiedTime.putIfAbsent(type, new HashMap<>());
+        Map<UUID, Long> uuid2time = lastNotifiedTime.get(type);
+        uuid2time.putIfAbsent(uuid, -1000000L);
+
+        long lastNotified = uuid2time.get(uuid);
+        long t = System.currentTimeMillis();
+
+        if (Math.abs(t - lastNotified) > millisec) {
+            uuid2time.put(uuid, t);
             return true;
         }
         return false;
     }
-    
-    @Override
-    public void onEnable() {
-        this.saveDefaultConfig();
-        
-        //getLogger().info("Enabling Icarus...");
-        BukkitScheduler scheduler = getServer().getScheduler();
-        
-        FileConfiguration config = getConfig();
-        
-        boolean conf_all_disable = config.getBoolean("cen_all_disable");
-        boolean conf_use_ticktime = config.getBoolean("cen-use-tick-time");
-        
-        
-        // Icarus
-        boolean conf_icarus_enabled = config.getBoolean("icarus-enabled");
-        int conf_icarus_hit = config.getInt("icarus-durability-hit");
-        boolean conf_icarus_allow_nether = config.getBoolean("icarus-allow-nether");
-        boolean conf_icarus_allow_raining = config.getBoolean("icarus-allow-raining");
-        int conf_icarus_minY = config.getInt("icarus-minimum-height");
-        int icarus_hit_per_sec = (int)Math.round(conf_icarus_hit*2/432.0*100);
-        
-        String icarus_warn_prefix=
-            "["+
-            ChatColor.BLUE+"CEN"+
-            ChatColor.RESET+"/"+
-            ChatColor.AQUA+"ICARUS"+
-            ChatColor.RESET+"] ";
-        String icarus_warn_line1=
-            icarus_warn_prefix+
-            ChatColor.RED+ChatColor.BOLD+"!!! YOUR WINGS ARE MELTING !!!"+
-            ChatColor.RESET;
-        String icarus_warn_line2;
-        if (conf_icarus_allow_nether){
-            icarus_warn_line2=
-                icarus_warn_prefix+
-                ChatColor.GRAY+ChatColor.ITALIC+
-                "When flying under direct sunlight,"+
-                ChatColor.RESET;
-        }else{
-            icarus_warn_line2=
-                icarus_warn_prefix+
-                ChatColor.GRAY+ChatColor.ITALIC+
-                "When flying under direct sunlight (or in nether),"+
-                ChatColor.RESET;
-        }
-        String icarus_warn_line3=
-            icarus_warn_prefix+
-            ChatColor.GRAY+ChatColor.ITALIC+
-            "Your elytra will take "+icarus_hit_per_sec+"% damage every second."+
-            ChatColor.RESET;
-        
-        
-        Runnable icarusRunnable = new Runnable() {
-            @Override
-            public void run() {
-                for (Player p: getServer().getOnlinePlayers()){
-                    String pname=p.getName();
-                    boolean gliding = p.isGliding();
-                    Location loc=p.getLocation();                    
-                    
-                    World w=p.getWorld();
-                    Chunk c=w.getChunkAt(loc);
-                    ChunkSnapshot cs=c.getChunkSnapshot();
 
-                    
-                    int chunkX=((loc.getBlockX()%16)+16)%16;
-                    int chunkY=loc.getBlockY();
-                    int chunkZ=((loc.getBlockZ()%16)+16)%16;
-                    int maxY=w.getMaxHeight();
-
-                    int skylight;
-                    if (!w.hasSkyLight()) skylight = 0;
-                    else if (chunkY>=maxY) skylight = 15;
-                    else skylight=cs.getBlockSkyLight(chunkX,chunkY,chunkZ);
-                    
-                    long time=w.getTime();
-                    // Below is the time range where daylight is at 15 (strongest)
-                    // For a more generous definition of day, we can use 23000~13000
-                    // Which includes dusk/sunrise
-                    boolean isDay = (time>=0) && (time<=12000);
-                    boolean sunUp;
-                    if (conf_icarus_allow_raining){
-                        sunUp = w.isClearWeather() && isDay && w.hasSkyLight();
-                    }else{
-                        sunUp = isDay && w.hasSkyLight();
-                    }
-                    
-                    boolean height_high = loc.getBlockY() > conf_icarus_minY;
-                    
-                    boolean sunlightOnPlayer = (skylight==15) && sunUp && height_high;
-                    
-                    if (!conf_icarus_allow_nether){
-                        if (w.isUltraWarm()) sunlightOnPlayer=true;
-                    }
-                    
-                    
-                    
-                    PlayerInventory pinv= p.getInventory();
-                    ItemStack chestplate=pinv.getChestplate();
-                    int damage=-1;
-                    boolean wearingElytra=false;
-                    if (chestplate != null){
-                        wearingElytra = (chestplate.getType() == Material.ELYTRA);
-                        ItemMeta imeta=chestplate.getItemMeta();
-                        if (wearingElytra && sunlightOnPlayer && gliding && height_high){
-                            if (imeta instanceof Damageable){
-                                Damageable dmg = (Damageable)imeta;
-                                damage=dmg.getDamage();
-                                damage+=conf_icarus_hit;
-                                if (damage>=Material.ELYTRA.getMaxDurability()){
-                                    damage=Material.ELYTRA.getMaxDurability()-1;
-                                }
-                                dmg.setDamage(damage);
-                                float durabilityRatio=1.0f-damage/(float)Material.ELYTRA.getMaxDurability();
-                                chestplate.setItemMeta(dmg);
-                                pinv.setChestplate(chestplate);
-                                
-                                if (rateLimitMsg("Icarus",pname,10000)){
-                                    p.sendMessage(icarus_warn_line1);
-                                    p.sendMessage(icarus_warn_line2);
-                                    p.sendMessage(icarus_warn_line3);
-                                }
-                                p.sendTitle(
-                                        " ", //title
-                                        ChatColor.RED+"Elytra "+Math.round(durabilityRatio*100)+"%", //subtitle
-                                        0, //fadein, ticks
-                                        20, //sustain, ticks
-                                        20); //FadeOut, ticks
-                            }
-                        }
-                    }                    
-                }
-            }
-        };
-        if ((!conf_all_disable) && conf_icarus_enabled)    
-            scheduler.scheduleSyncRepeatingTask(this,icarusRunnable, 0L, 10L);
-        
-        
-        
-        // Acrophobia
-        boolean conf_acrophobia_enabled = config.getBoolean("acrophobia-enabled");
-        double conf_acrophobia_height = config.getDouble("acrophobia-height");
-        double conf_acrophobia_duration_sec = config.getDouble("acrophobia-duration");
-        int conf_acrophobia_duration_ticks = (int)Math.round(conf_acrophobia_duration_sec*20);
-        int conf_acrophobia_power = (int)config.getDouble("acrophobia-power")-1;
-        double conf_acrophobia_delay = config.getDouble("acrophobia-delay");
-        
-        String acrophobia_prefix=
-            "["+
-            ChatColor.BLUE+"CEN"+
-            ChatColor.RESET+"/"+
-            ChatColor.AQUA+"Acrophobia"+
-            ChatColor.RESET+"] ";
-        String acrophobia_warn=
-            acrophobia_prefix+
-            ChatColor.RED+"You are afraid of heights..."+
-            ChatColor.RESET;        
-        String acrophobia_notice=
-            acrophobia_prefix+
-            ChatColor.RED+ChatColor.BOLD+"You are blinded by fear!"+
-            ChatColor.RESET;        
-        
-        Map<String,Long> lastOnGround = new HashMap<>();
-        
-        Runnable acrophobiaRunnable = new Runnable() {
-            @Override
-            public void run() {
-                for (Player p: getServer().getOnlinePlayers()){
-                    long t;
-                    if (conf_use_ticktime) t = p.getWorld().getFullTime()*50;
-                    else t=System.currentTimeMillis();
-                
-                    String pname=p.getName();
-                    boolean gliding = p.isGliding();
-                    Location loc=p.getLocation();                    
-                    
-                    World w=p.getWorld();
-                    Block highestBlock= w.getHighestBlockAt(loc); //excludes passable blocks - is this what we want? idk
-                    Location hightestBlockLoc=highestBlock.getLocation();
-                    
-                    boolean tooHigh = (loc.getY() - hightestBlockLoc.getY())>conf_acrophobia_height;
-                    boolean scared=tooHigh && gliding;
-                    
-                    if (lastOnGround.get(pname)==null) lastOnGround.put(pname,0L);
-                    
-                    if (!scared) lastOnGround.put(pname,t);
-                    else{
-                        if (rateLimitMsg("acrophobia-warn",p.getName(),10000)){
-                                p.sendMessage(acrophobia_warn);
-                            }
-                        if (t-lastOnGround.get(pname)>(conf_acrophobia_delay*1000-0.1)){
-                            p.addPotionEffect(
-                                new PotionEffect(
-                                    PotionEffectType.BLINDNESS,
-                                    conf_acrophobia_duration_ticks,
-                                    conf_acrophobia_power, true // ambient
-                                    ));
-                            if (rateLimitMsg("acrophobia-notice",p.getName(),10000)){
-                                rateLimitMsg("acrophobia-warn",p.getName(),0);
-                                p.sendMessage(acrophobia_notice);
-                            }
-                        }
-                    }
-                    
-                }
-            }
-        };
-        if ((!conf_all_disable) && conf_acrophobia_enabled)    
-            scheduler.scheduleSyncRepeatingTask(this,acrophobiaRunnable, 5L, 10L);
-        
-        
-        
-        // Terminal Velocity
-        boolean conf_tv_enabled = config.getBoolean("terminal-velocity-enabled");
-        // Convert from m/s to m/tick
-        double conf_tv_maxvel_mps = config.getDouble("terminal-velocity-speed");
-        double conf_tv_maxvel_mpt = conf_tv_maxvel_mps/20.0;
-         
-        String termvel_warn=
-            "["+
-            ChatColor.BLUE+"CEN"+
-            ChatColor.RESET+"/"+
-            ChatColor.AQUA+"TerminalVelocity"+
-            ChatColor.RESET+"] "+
-            ChatColor.RED+"Max elytra speed is "+
-            ChatColor.BOLD+conf_tv_maxvel_mps+"m/s"+
-            ChatColor.RESET;
-        
-        Listener termvelListener = new Listener(){
-            @EventHandler 
-            public void onPlayerMove(PlayerMoveEvent evt){
-                Player p=evt.getPlayer();
-                Vector v=p.getVelocity();
-                double speed = v.length(); 
-                boolean gliding = p.isGliding();
-                boolean overspeed=speed>conf_tv_maxvel_mpt;
-                
-                if (overspeed && gliding){
-                    p.setVelocity(v.normalize().multiply(conf_tv_maxvel_mpt));
-                    if (rateLimitMsg("TermVel",p.getName(),10000)){
-                        p.sendMessage(termvel_warn);
-                    }
-                }
-            }
-        };
-        if ((!conf_all_disable) && conf_tv_enabled)    
-            getServer().getPluginManager().registerEvents(termvelListener, this);
-            
-        
-        
-        // Glider
-        String glider_warn=
-            "["+
-            ChatColor.BLUE+"CEN"+
-            ChatColor.RESET+"/"+
-            ChatColor.AQUA+"Glider"+
-            ChatColor.RESET+"] "+
-            ChatColor.RED+ChatColor.BOLD+"Elytra boosting is not allowed!"+
-            ChatColor.RESET;
-        
-        boolean conf_glider_enabled = config.getBoolean("glider-enabled");
-        Listener gliderListener = new Listener(){
-            @EventHandler 
-            public void onPlayerInteract(PlayerInteractEvent evt){
-                Player p=evt.getPlayer();
-                Material mat=evt.getMaterial();
-                boolean is_fw=(mat==Material.FIREWORK_ROCKET);
-                boolean gliding = p.isGliding();
-                if (is_fw && gliding){
-                    evt.setCancelled(true);
-                    if (rateLimitMsg("glider",p.getName(),1000)){
-                        p.sendMessage(glider_warn);
-                    }
-                }
-            }
-        };
-        if ((!conf_all_disable) && conf_glider_enabled)    
-            getServer().getPluginManager().registerEvents(gliderListener, this);
-        
-        
-        
-        // Limit Boost
-        boolean conf_limitboost_enabled = config.getBoolean("limit-boost-enabled");
-        int conf_limitboost_time_ms = (int)Math.round(config.getDouble("limit-boost-time-period")*1000);
-        int conf_limitboost_count = (int)config.getDouble("limit-boost-count");
-        String limitboost_warn_tmp=
-            "["+
-            ChatColor.BLUE+"CEN"+
-            ChatColor.RESET+"/"+
-            ChatColor.AQUA+"LimitBoost"+
-            ChatColor.RESET+"] "+
-            ChatColor.RED+"You may only boost ";
-            
-        if (conf_limitboost_count!=1)
-            limitboost_warn_tmp = limitboost_warn_tmp+
-            ChatColor.BOLD+conf_limitboost_count+
-            ChatColor.RESET+ChatColor.RED+" times every ";
-        else
-            limitboost_warn_tmp = limitboost_warn_tmp+
-            ChatColor.BOLD+"ONCE"+
-            ChatColor.RESET+ChatColor.RED+" every ";
-        limitboost_warn_tmp = limitboost_warn_tmp+
-            ChatColor.BOLD+(conf_limitboost_time_ms/1000)+
-            ChatColor.RESET+ChatColor.RED+" seconds."+
-            ChatColor.RESET;
-        
-        final String limitboost_warn=limitboost_warn_tmp;
-        Map<String,List<Long>> boost_log= new HashMap();
-        
-        Listener limitboostListener = new Listener(){
-            @EventHandler 
-            public void onPlayerInteract(PlayerInteractEvent evt){
-                
-                Player p=evt.getPlayer();
-                String pn = p.getName();
-                Material mat=evt.getMaterial();
-                boolean is_fw=(mat==Material.FIREWORK_ROCKET);
-                boolean gliding = p.isGliding();
-                
-                long t;
-                if (conf_use_ticktime) t = p.getWorld().getFullTime()*50;
-                else t=System.currentTimeMillis();
-                if (is_fw && gliding){
-                    if (boost_log.get(pn) == null) boost_log.put(pn,new ArrayList());
-                    
-                    List<Long> personalList = boost_log.get(pn);
-                    while (
-                        personalList.size()>0
-                        && (Math.abs(personalList.get(0)-t)>conf_limitboost_time_ms))
-                        personalList.remove(0);
-                    
-                    // Remove duplicate event
-                    if (personalList.size()>0 &&
-                        (Math.abs(personalList.get(personalList.size()-1)-t)<10)){}
-                    else{
-                        if (personalList.size()>=conf_limitboost_count){
-                            evt.setCancelled(true);
-                            if (rateLimitMsg("limitboost",p.getName(),1000)){
-                                p.sendMessage(limitboost_warn);
-                            }
-                        }else{
-                            personalList.add(t);
-                        }
-                    }
-                }
-            }
-        };
-        if ((!conf_all_disable) && conf_limitboost_enabled)    
-            getServer().getPluginManager().registerEvents(limitboostListener, this);
-            
-            
-        
-        
-        StringBuilder sb = new StringBuilder();
-        sb.append(ChatColor.LIGHT_PURPLE);
-        sb.append("## ");
-        sb.append(ChatColor.BOLD);
-        sb.append("Configurable Elytra Nerfs");
-        sb.append(ChatColor.RESET);
-        sb.append(ChatColor.LIGHT_PURPLE);
-        sb.append(" ##");
-        sb.append(ChatColor.RESET+"\n");
-        
-        sb.append("  Plugin Status: ");
-        if (conf_all_disable){
-            sb.append(ChatColor.RED);
-            sb.append(ChatColor.BOLD);
-            sb.append("DISABLED");
-            sb.append(ChatColor.RESET+"\n");
-        }else{
-            sb.append(ChatColor.GREEN);
-            sb.append(ChatColor.BOLD);
-            sb.append("ENABLED");
-            sb.append(ChatColor.RESET+"\n");
-            
-            sb.append("    Use tick time: ");
-            sb.append(ChatColor.BOLD);
-            sb.append(conf_use_ticktime);
-            sb.append(ChatColor.RESET+"\n");
-            
-            sb.append("  Module [ ");
-            sb.append(ChatColor.BOLD);
-            sb.append("ICARUS");
-            sb.append(ChatColor.RESET);
-            sb.append(" ]: ");
-            if (conf_icarus_enabled){
-                sb.append(ChatColor.GREEN);
-                sb.append(ChatColor.BOLD);
-                sb.append("ENABLED");
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Durabilty hit: ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_icarus_hit);
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Allow nether: ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_icarus_allow_nether);
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Allow Rain: ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_icarus_allow_raining);
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Min Y: ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_icarus_minY);
-                sb.append(ChatColor.RESET+"\n");
-            }else{
-                sb.append(ChatColor.RED);
-                sb.append(ChatColor.BOLD);
-                sb.append("DISABLED");
-                sb.append(ChatColor.RESET+"\n");
-            }
-            
-            sb.append("  Module [ ");
-            sb.append(ChatColor.BOLD);
-            sb.append("Glider");
-            sb.append(ChatColor.RESET);
-            sb.append(" ]: ");
-            if (conf_glider_enabled){
-                sb.append(ChatColor.GREEN);
-                sb.append(ChatColor.BOLD);
-                sb.append("ENABLED");
-                sb.append(ChatColor.RESET+"\n");
-            }else{
-                sb.append(ChatColor.RED);
-                sb.append(ChatColor.BOLD);
-                sb.append("DISABLED");
-                sb.append(ChatColor.RESET+"\n");
-            }
-            
-            sb.append("  Module [ ");
-            sb.append(ChatColor.BOLD);
-            sb.append("Terminal Velocity");
-            sb.append(ChatColor.RESET);
-            sb.append(" ]: ");
-            if (conf_tv_enabled){
-                sb.append(ChatColor.GREEN);
-                sb.append(ChatColor.BOLD);
-                sb.append("ENABLED");
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Max speed (m/s): ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_tv_maxvel_mps);
-                sb.append(ChatColor.RESET+"\n");
-            }else{
-                sb.append(ChatColor.RED);
-                sb.append(ChatColor.BOLD);
-                sb.append("DISABLED");
-                sb.append(ChatColor.RESET+"\n");
-            }
-            
-            sb.append("  Module [ ");
-            sb.append(ChatColor.BOLD);
-            sb.append("Limit Boost");
-            sb.append(ChatColor.RESET);
-            sb.append(" ]: ");
-            if (conf_limitboost_enabled){
-                sb.append(ChatColor.GREEN);
-                sb.append(ChatColor.BOLD);
-                sb.append("ENABLED");
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Time range (sec): ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_limitboost_time_ms/1000.0);
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Max boost count: ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_limitboost_count);
-                sb.append(ChatColor.RESET+"\n");
-            }else{
-                sb.append(ChatColor.RED);
-                sb.append(ChatColor.BOLD);
-                sb.append("DISABLED");
-                sb.append(ChatColor.RESET+"\n");
-            }
-            
-            sb.append("  Module [ ");
-            sb.append(ChatColor.BOLD);
-            sb.append("Acrophobia");
-            sb.append(ChatColor.RESET);
-            sb.append(" ]: ");
-            if (conf_acrophobia_enabled){
-                sb.append(ChatColor.GREEN);
-                sb.append(ChatColor.BOLD);
-                sb.append("ENABLED");
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Height (m): ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_acrophobia_height);
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Blindness duration (sec): ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_acrophobia_duration_sec);
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Blindness power: ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_acrophobia_power+1);
-                sb.append(ChatColor.RESET+"\n");
-                
-                sb.append("    Delay (sec): ");
-                sb.append(ChatColor.BOLD);
-                sb.append(conf_acrophobia_delay);
-                sb.append(ChatColor.RESET+"\n");
-            }else{
-                sb.append(ChatColor.RED);
-                sb.append(ChatColor.BOLD);
-                sb.append("DISABLED");
-                sb.append(ChatColor.RESET+"\n");
-            }
-            
+    private void loadMessagesConfig() {
+        File messagesFile = new File(getDataFolder(), "messages.yml");
+        if (!messagesFile.exists()) {
+            saveResource("messages.yml", false);
         }
-        
-        // Remove trailing newline
-        sb.deleteCharAt(sb.length()-1);
-        command_output = sb.toString();
-    
+        messagesConfig = YamlConfiguration.loadConfiguration(messagesFile);
     }
-    @Override
-    public void onDisable() {
-        //getLogger().info("Disabling Icarus...");
+
+    private Component parseMsg(String path) {
+        return parseMsg(path, null, Collections.emptyMap());
+    }
+
+    private Component parseMsg(String path, Player player, String target, String replacement) {
+        Map<String, String> placeholders = new HashMap<>();
+        placeholders.put(target, replacement);
+        return parseMsg(path, player, placeholders);
+    }
+
+    private Component parseMsg(String path, Player player, Map<String, String> internalPlaceholders) {
+        String raw = messagesConfig.getString(path, "Missing path: " + path);
+        for (Map.Entry<String, String> entry : internalPlaceholders.entrySet()) {
+            raw = raw.replace(entry.getKey(), entry.getValue());
+        }
+        if (papiEnabled && player != null) {
+            raw = me.clip.placeholderapi.PlaceholderAPI.setPlaceholders(player, raw);
+        }
+        return mm.deserialize(raw);
+    }
+
+    private void buildAndCacheStatusMessage(boolean disabled, boolean useTicktime, FileConfiguration config) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<light_purple>## <bold>Configurable Elytra Nerfs</bold> ##</light_purple>\n");
+        sb.append("  Plugin Status: ").append(disabled ? "<red><bold>DISABLED</bold></red>" : "<green><bold>ENABLED</bold></green>").append("\n");
+
+        if (!disabled) {
+            sb.append("    Use tick time: <bold>").append(useTicktime).append("</bold>\n");
+            appendModuleStatus(sb, "ICARUS", config.getBoolean("icarus-enabled"), () -> {
+                sb.append("      Durability hit: <bold>").append(config.getInt("icarus-durability-hit")).append("</bold>\n");
+                sb.append("      Allow nether: <bold>").append(config.getBoolean("icarus-allow-nether")).append("</bold>\n");
+                sb.append("      Allow Rain: <bold>").append(config.getBoolean("icarus-allow-raining")).append("</bold>\n");
+                sb.append("      Min Y: <bold>").append(config.getInt("icarus-minimum-height")).append("</bold>\n");
+            });
+            appendModuleStatus(sb, "Glider", config.getBoolean("glider-enabled"), null);
+            appendModuleStatus(sb, "Terminal Velocity", config.getBoolean("terminal-velocity-enabled"), () ->
+                    sb.append("      Max speed (m/s): <bold>").append(config.getDouble("terminal-velocity-speed")).append("</bold>\n")
+            );
+            appendModuleStatus(sb, "Limit Boost", config.getBoolean("limit-boost-enabled"), () -> {
+                sb.append("      Time range (sec): <bold>").append(config.getDouble("limit-boost-time-period")).append("</bold>\n");
+                sb.append("      Max boost count: <bold>").append(config.getInt("limit-boost-count")).append("</bold>\n");
+            });
+            appendModuleStatus(sb, "Acrophobia", config.getBoolean("acrophobia-enabled"), () -> {
+                sb.append("      Height (m): <bold>").append(config.getDouble("acrophobia-height")).append("</bold>\n");
+                sb.append("      Blindness duration (sec): <bold>").append(config.getDouble("acrophobia-duration")).append("</bold>\n");
+                sb.append("      Blindness power: <bold>").append((int) config.getDouble("acrophobia-power")).append("</bold>\n");
+                sb.append("      Delay (sec): <bold>").append(config.getDouble("acrophobia-delay")).append("</bold>\n");
+            });
+        }
+
+        if (sb.length() > 0 && sb.charAt(sb.length() - 1) == '\n') {
+            sb.deleteCharAt(sb.length() - 1);
+        }
+        commandOutput = mm.deserialize(sb.toString());
+    }
+
+    private void appendModuleStatus(StringBuilder sb, String moduleName, boolean enabled, Runnable detailedStats) {
+        sb.append("  Module [ <bold>").append(moduleName).append("</bold> ]: ").append(enabled ? "<green><bold>ENABLED</bold></green>" : "<red><bold>DISABLED</bold></red>").append("\n");
+        if (enabled && detailedStats != null) {
+            detailedStats.run();
+        }
     }
 }
-
-
